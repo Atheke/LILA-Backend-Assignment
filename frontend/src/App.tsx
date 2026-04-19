@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createMatch, createSocket, getCurrentUserId, joinMatch, sendMove } from "./nakama";
+import { createMatch, createSocket, getCurrentUserId, joinMatch, listMatches, sendMove } from "./nakama";
 
 type CellValue = "X" | "O" | "";
 type WinnerValue = "X" | "O" | "draw" | null;
@@ -11,12 +11,18 @@ interface MatchState {
   players: Record<string, "X" | "O">;
 }
 
+interface MatchListing {
+  match_id: string;
+  size: number;
+}
+
 function App(): JSX.Element {
   const [connected, setConnected] = useState(false);
   const [matchId, setMatchId] = useState("");
   const [joinId, setJoinId] = useState("");
   const [playerCount, setPlayerCount] = useState(0);
   const [error, setError] = useState("");
+  const [availableMatches, setAvailableMatches] = useState<MatchListing[]>([]);
   const [board, setBoard] = useState<CellValue[]>(Array<CellValue>(9).fill(""));
   const [turn, setTurn] = useState<string | null>(null);
   const [players, setPlayers] = useState<Record<string, "X" | "O">>({});
@@ -120,6 +126,20 @@ function App(): JSX.Element {
     }
   };
 
+  const refreshMatches = async () => {
+    try {
+      const result = await listMatches();
+      setAvailableMatches(
+        result.matches.map((match) => ({
+          match_id: match.match_id,
+          size: match.size
+        }))
+      );
+    } catch (err) {
+      setError(`Match listing failed: ${String(err)}`);
+    }
+  };
+
   return (
     <main style={{ maxWidth: 640, margin: "0 auto", padding: 16 }}>
       <h1>Multiplayer Tic-Tac-Toe</h1>
@@ -139,7 +159,28 @@ function App(): JSX.Element {
         <button type="button" onClick={onJoinMatch} disabled={!connected}>
           Join Match
         </button>
+        <button type="button" onClick={refreshMatches} disabled={!connected}>
+          Discover Open Matches
+        </button>
       </div>
+
+      {availableMatches.length > 0 && (
+        <section style={{ marginTop: 12 }}>
+          <p>
+            <strong>Discovered matches:</strong>
+          </p>
+          {availableMatches.map((match) => (
+            <button
+              key={match.match_id}
+              type="button"
+              onClick={() => setJoinId(match.match_id)}
+              style={{ marginRight: 8, marginBottom: 8 }}
+            >
+              {match.match_id} ({match.size}/2)
+            </button>
+          ))}
+        </section>
+      )}
 
       {matchId && (
         <section style={{ marginTop: 16 }}>

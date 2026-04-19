@@ -56,3 +56,8 @@ export async function sendMove(matchId: string, index: number): Promise<void> {
   const activeSocket = await createSocket();
   await activeSocket.sendMatchState(matchId, 1, JSON.stringify({ index }));
 }
+
+export async function listMatches(limit = 20) {
+  const activeSession = await authenticateDevice();
+  return client.listMatches(activeSession, limit, true, "", 0, 2, "{}", "tic_tac_toe");
+}
