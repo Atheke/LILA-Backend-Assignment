@@ -41,7 +41,11 @@ declare namespace nkruntime {
     data: string;
   }
   interface Initializer {
-    registerMatch<TState>(name: string, handler: MatchHandler<TState>): void;
+    registerMatch<TState>(name: string, handler: MatchHandler<TState> | Record<string, string>): void;
+    registerRpc(id: string, fn: (ctx: Context, logger: Logger, nk: Nakama, payload: string) => string): void;
+  }
+  interface Nakama {
+    matchCreate(module: string, params: Record<string, unknown>): string;
   }
   interface MatchHandler<TState> {
     matchInit(ctx: Context, logger: Logger, nk: Nakama, params: Record<string, unknown>): MatchInitResult<TState>;

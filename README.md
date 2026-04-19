@@ -1,6 +1,6 @@
 # Multiplayer Tic-Tac-Toe (Nakama)
 
-Production-ready backend-focused multiplayer Tic-Tac-Toe using Nakama with server-authoritative game logic.
+Multiplayer Tic-Tac-Toe with Nakama (server-authoritative match) and a React client.
 
 ## Tech Stack
 
@@ -13,16 +13,20 @@ Production-ready backend-focused multiplayer Tic-Tac-Toe using Nakama with serve
 
 - `docker-compose.yml` - Local Nakama and Postgres containers
 - `nakama/` - Runtime source and TypeScript build config
-- `nakama/modules/index.ts` - Match registration entrypoint
-- `nakama/modules/tic_tac_toe.ts` - Server-authoritative match handler
+- `nakama/modules/index.ts` - Runtime entrypoint: registers the match handler and RPCs (`InitModule`)
+- `nakama/modules/tic_tac_toe.ts` - Server-authoritative match logic (join, moves, restart, broadcasts) and `create_tic_tac_toe_match` RPC implementation
 - `frontend/` - Web client
-- `frontend/src/nakama.ts` - Nakama client helpers (auth, socket, matchmaking, move send)
-- `frontend/src/App.tsx` - Multiplayer UI and realtime game rendering
+- `frontend/src/env.ts` - Reads public Nakama settings from `VITE_*` env vars
+- `frontend/src/nakama.ts` - Nakama client (device auth, socket, RPC, match messages)
+- `frontend/src/App.tsx` - UI
+- `frontend/.env.example` - Template for production builds
+- `frontend/.env.development` - Defaults for local `npm run dev` against Docker Nakama
 
 ## Architecture and Design Decisions
 
-- All game logic runs on Nakama in `tic_tac_toe.ts`.
-- Clients only send move intent (`index`) with opcode `1`.
+- All game rules run on Nakama in `tic_tac_toe.ts`. `index.ts` only wires `InitModule` to Nakama’s initializer (match name `tic_tac_toe`, RPC `create_tic_tac_toe_match`).
+- The web client connects to Nakama automatically on load (no manual “connect” step).
+- Clients send move intent (`index`) with opcode `1`, and restart requests with opcode `3`.
 - Server validates:
   - match capacity (2 players max)
   - turn ownership
@@ -30,7 +34,7 @@ Production-ready backend-focused multiplayer Tic-Tac-Toe using Nakama with serve
   - unoccupied cells
 - Server computes turn changes and winner detection.
 - Server broadcasts authoritative state using:
-  - `TextEncoder` on backend
+  - `TextEncoder` on backend (with a small fallback when `TextEncoder` is unavailable in the JS runtime)
   - `dispatcher.broadcastMessage(2, Uint8ArrayPayload)`
 - Frontend decodes state updates using `TextDecoder` from `socket.onmatchdata`.
 
@@ -71,30 +75,33 @@ npm run dev
 
 Vite default URL: `http://127.0.0.1:5173`
 
+Local dev loads `frontend/.env.development`. For a production bundle, set `VITE_NAKAMA_HOST`, `VITE_NAKAMA_PORT`, `VITE_NAKAMA_SERVER_KEY`, and `VITE_NAKAMA_USE_SSL` (`true` or `false`) in the build environment or in an untracked `frontend/.env.production` copied from `frontend/.env.example`. `npm run build` fails if any of these are missing.
+
 ## Multiplayer Testing Guide
 
-1. Open two browser windows (or one normal + one incognito).
-2. In both windows click **Connect to Nakama**.
-3. In window A click **Create Match**.
-4. Copy match ID and use **Join Match** in window B, or use **Discover Open Matches**.
-5. Click board cells to send moves.
-6. Confirm:
+1. Open two browser windows (or one normal + one incognito). Each tab loads the app and connects to Nakama on its own.
+2. In window A click **Create Match**.
+3. Copy match ID and use **Join Match** in window B, or use **Discover Open Matches**.
+4. Click board cells to send moves.
+5. Confirm:
    - turns switch correctly
    - invalid moves are ignored
    - state updates in both windows in real-time
    - winner/draw appears correctly
+   - Restart / Restart Round syncs a new game via opcode `3`
 
 ## Deployment Process Notes
 
-- Backend deployment target: Nakama + Postgres on a cloud VM or managed container platform.
-- Frontend deployment target: Vercel, Netlify, or equivalent static hosting.
-- Build Nakama modules before backend deployment (`npm run build` in `nakama/`).
-- Ensure deployed Nakama runtime path points to `/nakama/data/modules/build`.
+- Backend: Nakama + Postgres (VM, Kubernetes, or managed containers).
+- Frontend: static hosting; configure the same four `VITE_NAKAMA_*` variables in the host’s build settings so the client points at your Nakama HTTP/WebSocket endpoint.
+- Run `npm run build` in `nakama/` before deploying the game server.
+- Point the Nakama container’s module path at the built JS (see `docker-compose.yml`).
 
 ## Server Configuration Details
 
 - Server key: `defaultkey`
 - Match handler name: `tic_tac_toe`
 - Match data opcodes:
-  - `1`: player move input (client -> server)
-  - `2`: authoritative state update (server -> clients)
+  - `1`: player move input (client → server)
+  - `2`: authoritative state update (server → clients)
+  - `3`: restart request when both players are present (client → server); server resets board and turn

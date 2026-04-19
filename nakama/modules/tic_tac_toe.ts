@@ -18,6 +18,21 @@ interface MovePayload {
   index: number;
 }
 
+type RuntimePresence = nkruntime.Presence & {
+  userId?: string;
+  user_id?: string;
+  username?: string;
+  sessionId?: string;
+  session_id?: string;
+};
+
+type RuntimeMatchData = nkruntime.MatchData & {
+  opCode?: number;
+  op_code?: number;
+  sender?: RuntimePresence;
+  data?: Uint8Array | ArrayBuffer | string;
+};
+
 const WIN_LINES: number[][] = [
   [0, 1, 2],
   [3, 4, 5],
@@ -29,8 +44,29 @@ const WIN_LINES: number[][] = [
   [2, 4, 6]
 ];
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+class SafeTextEncoder {
+  encode(input: string): Uint8Array {
+    const escaped = unescape(encodeURIComponent(input));
+    const bytes = new Uint8Array(escaped.length);
+    for (let i = 0; i < escaped.length; i++) {
+      bytes[i] = escaped.charCodeAt(i);
+    }
+    return bytes;
+  }
+}
+
+class SafeTextDecoder {
+  decode(input: Uint8Array): string {
+    let encoded = "";
+    for (let i = 0; i < input.length; i++) {
+      encoded += String.fromCharCode(input[i]);
+    }
+    return decodeURIComponent(escape(encoded));
+  }
+}
+
+const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : new SafeTextEncoder();
+const decoder = typeof TextDecoder !== "undefined" ? new TextDecoder() : new SafeTextDecoder();
 
 function detectWinner(board: CellValue[]): WinnerValue {
   for (const [a, b, c] of WIN_LINES) {
@@ -58,134 +94,258 @@ function buildLabel(state: MatchState): string {
 
 function broadcastState(dispatcher: nkruntime.MatchDispatcher, state: MatchState): void {
   const payload = encoder.encode(JSON.stringify(state));
-  dispatcher.broadcastMessage(2, payload);
+  const buffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
+  dispatcher.broadcastMessage(2, buffer as unknown as Uint8Array);
 }
 
-const TicTacToeMatch: nkruntime.MatchHandler<MatchState> = {
-  matchInit(_ctx, _logger, _nk, _params) {
-    const state: MatchState = {
-      board: Array<CellValue>(9).fill(""),
-      turn: null,
-      winner: null,
-      players: {}
-    };
+function getUserId(presence: RuntimePresence | undefined): string {
+  if (!presence) {
+    return "";
+  }
 
-    return {
-      state,
-      tickRate: 1,
-      label: buildLabel(state)
-    };
-  },
+  const direct =
+    (typeof presence.userId === "string" && presence.userId) ||
+    (typeof presence.user_id === "string" && presence.user_id) ||
+    (typeof presence.username === "string" && presence.username) ||
+    (typeof presence.sessionId === "string" && presence.sessionId) ||
+    (typeof presence.session_id === "string" && presence.session_id) ||
+    "";
 
-  matchJoinAttempt(_ctx, _logger, _nk, dispatcher, _tick, state, presence, _metadata) {
-    const players = Object.keys(state.players);
-    const allowed = players.length < 2 || state.players[presence.userId] !== undefined;
-    if (!allowed) {
-      return { state, accept: false, rejectMessage: "Match is full." };
+  if (direct) {
+    return direct;
+  }
+
+  const objectPresence = presence as unknown as Record<string, unknown>;
+  for (const [key, value] of Object.entries(objectPresence)) {
+    if (typeof value === "string" && value.length > 0 && (key.toLowerCase().includes("user") || key.toLowerCase().includes("session"))) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function decodeMatchData(data: Uint8Array | ArrayBuffer | string | undefined): string {
+  if (typeof data === "string") {
+    return data;
+  }
+
+  if (!data) {
+    return "";
+  }
+
+  if (data instanceof Uint8Array) {
+    return decoder.decode(data);
+  }
+
+  if (data instanceof ArrayBuffer) {
+    return decoder.decode(new Uint8Array(data));
+  }
+
+  return "";
+}
+
+function matchInit(_ctx: nkruntime.Context, _logger: nkruntime.Logger, _nk: nkruntime.Nakama, _params: unknown) {
+  const state: MatchState = {
+    board: Array<CellValue>(9).fill(""),
+    turn: null,
+    winner: null,
+    players: {}
+  };
+
+  return {
+    state,
+    tickRate: 1,
+    label: buildLabel(state)
+  };
+}
+
+function matchJoinAttempt(
+  _ctx: nkruntime.Context,
+  _logger: nkruntime.Logger,
+  _nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  _tick: number,
+  state: MatchState,
+  presence: nkruntime.Presence,
+  _metadata: Record<string, unknown>
+) {
+  const players = Object.keys(state.players);
+  const userId = getUserId(presence as RuntimePresence);
+  const allowed = players.length < 2 || state.players[userId] !== undefined;
+  if (!allowed) {
+    return { state, accept: false, rejectMessage: "Match is full." };
+  }
+
+  dispatcher.matchLabelUpdate(buildLabel(state));
+  return { state, accept: true };
+}
+
+function matchJoin(
+  _ctx: nkruntime.Context,
+  _logger: nkruntime.Logger,
+  _nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  _tick: number,
+  state: MatchState,
+  presences: nkruntime.Presence[]
+) {
+  for (const presence of presences as RuntimePresence[]) {
+    const userId = getUserId(presence);
+    if (!userId) {
+      continue;
+    }
+    if (!state.players[userId]) {
+      const symbol: "X" | "O" = Object.values(state.players).includes("X") ? "O" : "X";
+      state.players[userId] = symbol;
+    }
+  }
+
+  if (!state.turn) {
+    const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
+    state.turn = xPlayer ? xPlayer[0] : null;
+  }
+
+  dispatcher.matchLabelUpdate(buildLabel(state));
+  broadcastState(dispatcher, state);
+  return { state };
+}
+
+function matchLoop(
+  _ctx: nkruntime.Context,
+  _logger: nkruntime.Logger,
+  _nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  _tick: number,
+  state: MatchState,
+  messages: nkruntime.MatchData[]
+) {
+  for (const message of messages as RuntimeMatchData[]) {
+    const opCode = message.opCode ?? message.op_code ?? -1;
+    const senderId = getUserId(message.sender);
+    if (!senderId) {
+      continue;
     }
 
-    dispatcher.matchLabelUpdate(buildLabel(state));
-    return { state, accept: true };
-  },
-
-  matchJoin(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
-    for (const presence of presences) {
-      if (!state.players[presence.userId]) {
-        const symbol: "X" | "O" = Object.values(state.players).includes("X") ? "O" : "X";
-        state.players[presence.userId] = symbol;
+    if (opCode === 3) {
+      if (!state.players[senderId]) {
+        continue;
       }
-    }
-
-    if (!state.turn) {
+      if (Object.keys(state.players).length < 2) {
+        continue;
+      }
+      state.board = Array<CellValue>(9).fill("");
+      state.winner = null;
       const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
-      state.turn = xPlayer ? xPlayer[0] : null;
-    }
-
-    dispatcher.matchLabelUpdate(buildLabel(state));
-    broadcastState(dispatcher, state);
-    return { state };
-  },
-
-  matchLoop(_ctx, logger, _nk, dispatcher, _tick, state, messages) {
-    for (const message of messages) {
-      if (message.opCode !== 1) {
-        continue;
-      }
-
-      if (state.winner !== null) {
-        continue;
-      }
-
-      if (state.turn !== message.sender.userId) {
-        logger.debug("Rejected move: not player's turn.");
-        continue;
-      }
-
-      let payload: MovePayload;
-      try {
-        payload = JSON.parse(decoder.decode(message.data)) as MovePayload;
-      } catch (_error) {
-        logger.debug("Rejected move: invalid payload.");
-        continue;
-      }
-
-      if (!Number.isInteger(payload.index) || payload.index < 0 || payload.index > 8) {
-        logger.debug("Rejected move: invalid index.");
-        continue;
-      }
-
-      if (state.board[payload.index] !== "") {
-        logger.debug("Rejected move: cell already occupied.");
-        continue;
-      }
-
-      const symbol = state.players[message.sender.userId];
-      if (!symbol) {
-        logger.debug("Rejected move: sender not in player map.");
-        continue;
-      }
-
-      state.board[payload.index] = symbol;
-      state.winner = detectWinner(state.board);
-
-      if (state.winner === null) {
-        const nextPlayer = Object.keys(state.players).find((playerId) => playerId !== message.sender.userId) || null;
-        state.turn = nextPlayer;
-      }
-
+      state.turn = xPlayer ? xPlayer[0] : Object.keys(state.players)[0] || null;
       dispatcher.matchLabelUpdate(buildLabel(state));
       broadcastState(dispatcher, state);
+      continue;
     }
 
-    return { state };
-  },
-
-  matchLeave(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
-    for (const presence of presences) {
-      delete state.players[presence.userId];
-      if (state.turn === presence.userId) {
-        const nextPlayer = Object.keys(state.players)[0];
-        state.turn = nextPlayer || null;
-      }
+    if (opCode !== 1) {
+      continue;
     }
 
-    if (Object.keys(state.players).length === 0) {
-      return null;
+    if (state.winner !== null) {
+      continue;
+    }
+
+    if (state.turn !== senderId) {
+      continue;
+    }
+
+    let payload: MovePayload;
+    try {
+      payload = JSON.parse(decodeMatchData(message.data)) as MovePayload;
+    } catch (_error) {
+      continue;
+    }
+
+    if (!Number.isInteger(payload.index) || payload.index < 0 || payload.index > 8) {
+      continue;
+    }
+
+    if (state.board[payload.index] !== "") {
+      continue;
+    }
+
+    const symbol = state.players[senderId];
+    if (!symbol) {
+      continue;
+    }
+
+    state.board[payload.index] = symbol;
+    state.winner = detectWinner(state.board);
+
+    if (state.winner === null) {
+      const nextPlayer = Object.keys(state.players).find((playerId) => playerId !== senderId) || null;
+      state.turn = nextPlayer;
     }
 
     dispatcher.matchLabelUpdate(buildLabel(state));
     broadcastState(dispatcher, state);
-    return { state };
-  },
-
-  matchTerminate(_ctx, _logger, _nk, dispatcher, _tick, state, _graceSeconds) {
-    broadcastState(dispatcher, state);
-    return { state };
-  },
-
-  matchSignal(_ctx, _logger, _nk, _dispatcher, _tick, state, data) {
-    return { state, data };
   }
-};
 
-export { MatchState, TicTacToeMatch };
+  return { state };
+}
+
+function matchLeave(
+  _ctx: nkruntime.Context,
+  _logger: nkruntime.Logger,
+  _nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  _tick: number,
+  state: MatchState,
+  presences: nkruntime.Presence[]
+) {
+  for (const presence of presences as RuntimePresence[]) {
+    const userId = getUserId(presence);
+    if (!userId) {
+      continue;
+    }
+    delete state.players[userId];
+    if (state.turn === userId) {
+      const nextPlayer = Object.keys(state.players)[0];
+      state.turn = nextPlayer || null;
+    }
+  }
+
+  if (Object.keys(state.players).length === 0) {
+    return null;
+  }
+
+  dispatcher.matchLabelUpdate(buildLabel(state));
+  broadcastState(dispatcher, state);
+  return { state };
+}
+
+function matchTerminate(
+  _ctx: nkruntime.Context,
+  _logger: nkruntime.Logger,
+  _nk: nkruntime.Nakama,
+  dispatcher: nkruntime.MatchDispatcher,
+  _tick: number,
+  state: MatchState,
+  _graceSeconds: number
+) {
+  broadcastState(dispatcher, state);
+  return { state };
+}
+
+function matchSignal(
+  _ctx: nkruntime.Context,
+  _logger: nkruntime.Logger,
+  _nk: nkruntime.Nakama,
+  _dispatcher: nkruntime.MatchDispatcher,
+  _tick: number,
+  state: MatchState,
+  data: string
+) {
+  return { state, data };
+}
+
+function createTicTacToeMatch(_ctx: nkruntime.Context, _logger: nkruntime.Logger, nk: nkruntime.Nakama, _payload: string): string {
+  const matchId = nk.matchCreate("tic_tac_toe", {});
+  return JSON.stringify({ matchId });
+}

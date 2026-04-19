@@ -1,13 +1,17 @@
-import { TicTacToeMatch } from "./tic_tac_toe";
-
-const InitModule: nkruntime.InitModule = function (
+function InitModule(
   _ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
+  _logger: nkruntime.Logger,
   _nk: nkruntime.Nakama,
   initializer: nkruntime.Initializer
 ): void {
-  initializer.registerMatch("tic_tac_toe", TicTacToeMatch);
-  logger.info("Registered match handler: tic_tac_toe");
-};
-
-export { InitModule };
+  initializer.registerMatch("tic_tac_toe", {
+    matchInit: matchInit,
+    matchJoinAttempt: matchJoinAttempt,
+    matchJoin: matchJoin,
+    matchLoop: matchLoop,
+    matchLeave: matchLeave,
+    matchTerminate: matchTerminate,
+    matchSignal: matchSignal
+  });
+  initializer.registerRpc("create_tic_tac_toe_match", createTicTacToeMatch);
+}

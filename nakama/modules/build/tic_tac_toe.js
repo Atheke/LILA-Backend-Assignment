@@ -1,6 +1,4 @@
 "use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.TicTacToeMatch = void 0;
 const WIN_LINES = [
     [0, 1, 2],
     [3, 4, 5],
@@ -11,8 +9,27 @@ const WIN_LINES = [
     [0, 4, 8],
     [2, 4, 6]
 ];
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+class SafeTextEncoder {
+    encode(input) {
+        const escaped = unescape(encodeURIComponent(input));
+        const bytes = new Uint8Array(escaped.length);
+        for (let i = 0; i < escaped.length; i++) {
+            bytes[i] = escaped.charCodeAt(i);
+        }
+        return bytes;
+    }
+}
+class SafeTextDecoder {
+    decode(input) {
+        let encoded = "";
+        for (let i = 0; i < input.length; i++) {
+            encoded += String.fromCharCode(input[i]);
+        }
+        return decodeURIComponent(escape(encoded));
+    }
+}
+const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : new SafeTextEncoder();
+const decoder = typeof TextDecoder !== "undefined" ? new TextDecoder() : new SafeTextDecoder();
 function detectWinner(board) {
     for (const [a, b, c] of WIN_LINES) {
         if (board[a] !== "" && board[a] === board[b] && board[b] === board[c]) {
@@ -34,111 +51,174 @@ function buildLabel(state) {
 }
 function broadcastState(dispatcher, state) {
     const payload = encoder.encode(JSON.stringify(state));
-    dispatcher.broadcastMessage(2, payload);
+    const buffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
+    dispatcher.broadcastMessage(2, buffer);
 }
-const TicTacToeMatch = {
-    matchInit(_ctx, _logger, _nk, _params) {
-        const state = {
-            board: Array(9).fill(""),
-            turn: null,
-            winner: null,
-            players: {}
-        };
-        return {
-            state,
-            tickRate: 1,
-            label: buildLabel(state)
-        };
-    },
-    matchJoinAttempt(_ctx, _logger, _nk, dispatcher, _tick, state, presence, _metadata) {
-        const players = Object.keys(state.players);
-        const allowed = players.length < 2 || state.players[presence.userId] !== undefined;
-        if (!allowed) {
-            return { state, accept: false, rejectMessage: "Match is full." };
+function getUserId(presence) {
+    if (!presence) {
+        return "";
+    }
+    const direct = (typeof presence.userId === "string" && presence.userId) ||
+        (typeof presence.user_id === "string" && presence.user_id) ||
+        (typeof presence.username === "string" && presence.username) ||
+        (typeof presence.sessionId === "string" && presence.sessionId) ||
+        (typeof presence.session_id === "string" && presence.session_id) ||
+        "";
+    if (direct) {
+        return direct;
+    }
+    const objectPresence = presence;
+    for (const [key, value] of Object.entries(objectPresence)) {
+        if (typeof value === "string" && value.length > 0 && (key.toLowerCase().includes("user") || key.toLowerCase().includes("session"))) {
+            return value;
         }
-        dispatcher.matchLabelUpdate(buildLabel(state));
-        return { state, accept: true };
-    },
-    matchJoin(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
-        for (const presence of presences) {
-            if (!state.players[presence.userId]) {
-                const symbol = Object.values(state.players).includes("X") ? "O" : "X";
-                state.players[presence.userId] = symbol;
+    }
+    return "";
+}
+function decodeMatchData(data) {
+    if (typeof data === "string") {
+        return data;
+    }
+    if (!data) {
+        return "";
+    }
+    if (data instanceof Uint8Array) {
+        return decoder.decode(data);
+    }
+    if (data instanceof ArrayBuffer) {
+        return decoder.decode(new Uint8Array(data));
+    }
+    return "";
+}
+function matchInit(_ctx, _logger, _nk, _params) {
+    const state = {
+        board: Array(9).fill(""),
+        turn: null,
+        winner: null,
+        players: {}
+    };
+    return {
+        state,
+        tickRate: 1,
+        label: buildLabel(state)
+    };
+}
+function matchJoinAttempt(_ctx, _logger, _nk, dispatcher, _tick, state, presence, _metadata) {
+    const players = Object.keys(state.players);
+    const userId = getUserId(presence);
+    const allowed = players.length < 2 || state.players[userId] !== undefined;
+    if (!allowed) {
+        return { state, accept: false, rejectMessage: "Match is full." };
+    }
+    dispatcher.matchLabelUpdate(buildLabel(state));
+    return { state, accept: true };
+}
+function matchJoin(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
+    for (const presence of presences) {
+        const userId = getUserId(presence);
+        if (!userId) {
+            continue;
+        }
+        if (!state.players[userId]) {
+            const symbol = Object.values(state.players).includes("X") ? "O" : "X";
+            state.players[userId] = symbol;
+        }
+    }
+    if (!state.turn) {
+        const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
+        state.turn = xPlayer ? xPlayer[0] : null;
+    }
+    dispatcher.matchLabelUpdate(buildLabel(state));
+    broadcastState(dispatcher, state);
+    return { state };
+}
+function matchLoop(_ctx, _logger, _nk, dispatcher, _tick, state, messages) {
+    var _a, _b;
+    for (const message of messages) {
+        const opCode = (_b = (_a = message.opCode) !== null && _a !== void 0 ? _a : message.op_code) !== null && _b !== void 0 ? _b : -1;
+        const senderId = getUserId(message.sender);
+        if (!senderId) {
+            continue;
+        }
+        if (opCode === 3) {
+            if (!state.players[senderId]) {
+                continue;
             }
-        }
-        if (!state.turn) {
+            if (Object.keys(state.players).length < 2) {
+                continue;
+            }
+            state.board = Array(9).fill("");
+            state.winner = null;
             const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
-            state.turn = xPlayer ? xPlayer[0] : null;
-        }
-        dispatcher.matchLabelUpdate(buildLabel(state));
-        broadcastState(dispatcher, state);
-        return { state };
-    },
-    matchLoop(_ctx, logger, _nk, dispatcher, _tick, state, messages) {
-        for (const message of messages) {
-            if (message.opCode !== 1) {
-                continue;
-            }
-            if (state.winner !== null) {
-                continue;
-            }
-            if (state.turn !== message.sender.userId) {
-                logger.debug("Rejected move: not player's turn.");
-                continue;
-            }
-            let payload;
-            try {
-                payload = JSON.parse(decoder.decode(message.data));
-            }
-            catch (_error) {
-                logger.debug("Rejected move: invalid payload.");
-                continue;
-            }
-            if (!Number.isInteger(payload.index) || payload.index < 0 || payload.index > 8) {
-                logger.debug("Rejected move: invalid index.");
-                continue;
-            }
-            if (state.board[payload.index] !== "") {
-                logger.debug("Rejected move: cell already occupied.");
-                continue;
-            }
-            const symbol = state.players[message.sender.userId];
-            if (!symbol) {
-                logger.debug("Rejected move: sender not in player map.");
-                continue;
-            }
-            state.board[payload.index] = symbol;
-            state.winner = detectWinner(state.board);
-            if (state.winner === null) {
-                const nextPlayer = Object.keys(state.players).find((playerId) => playerId !== message.sender.userId) || null;
-                state.turn = nextPlayer;
-            }
+            state.turn = xPlayer ? xPlayer[0] : Object.keys(state.players)[0] || null;
             dispatcher.matchLabelUpdate(buildLabel(state));
             broadcastState(dispatcher, state);
+            continue;
         }
-        return { state };
-    },
-    matchLeave(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
-        for (const presence of presences) {
-            delete state.players[presence.userId];
-            if (state.turn === presence.userId) {
-                const nextPlayer = Object.keys(state.players)[0];
-                state.turn = nextPlayer || null;
-            }
+        if (opCode !== 1) {
+            continue;
         }
-        if (Object.keys(state.players).length === 0) {
-            return null;
+        if (state.winner !== null) {
+            continue;
+        }
+        if (state.turn !== senderId) {
+            continue;
+        }
+        let payload;
+        try {
+            payload = JSON.parse(decodeMatchData(message.data));
+        }
+        catch (_error) {
+            continue;
+        }
+        if (!Number.isInteger(payload.index) || payload.index < 0 || payload.index > 8) {
+            continue;
+        }
+        if (state.board[payload.index] !== "") {
+            continue;
+        }
+        const symbol = state.players[senderId];
+        if (!symbol) {
+            continue;
+        }
+        state.board[payload.index] = symbol;
+        state.winner = detectWinner(state.board);
+        if (state.winner === null) {
+            const nextPlayer = Object.keys(state.players).find((playerId) => playerId !== senderId) || null;
+            state.turn = nextPlayer;
         }
         dispatcher.matchLabelUpdate(buildLabel(state));
         broadcastState(dispatcher, state);
-        return { state };
-    },
-    matchTerminate(_ctx, _logger, _nk, dispatcher, _tick, state, _graceSeconds) {
-        broadcastState(dispatcher, state);
-        return { state };
-    },
-    matchSignal(_ctx, _logger, _nk, _dispatcher, _tick, state, data) {
-        return { state, data };
     }
-};
-exports.TicTacToeMatch = TicTacToeMatch;
+    return { state };
+}
+function matchLeave(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
+    for (const presence of presences) {
+        const userId = getUserId(presence);
+        if (!userId) {
+            continue;
+        }
+        delete state.players[userId];
+        if (state.turn === userId) {
+            const nextPlayer = Object.keys(state.players)[0];
+            state.turn = nextPlayer || null;
+        }
+    }
+    if (Object.keys(state.players).length === 0) {
+        return null;
+    }
+    dispatcher.matchLabelUpdate(buildLabel(state));
+    broadcastState(dispatcher, state);
+    return { state };
+}
+function matchTerminate(_ctx, _logger, _nk, dispatcher, _tick, state, _graceSeconds) {
+    broadcastState(dispatcher, state);
+    return { state };
+}
+function matchSignal(_ctx, _logger, _nk, _dispatcher, _tick, state, data) {
+    return { state, data };
+}
+function createTicTacToeMatch(_ctx, _logger, nk, _payload) {
+    const matchId = nk.matchCreate("tic_tac_toe", {});
+    return JSON.stringify({ matchId });
+}

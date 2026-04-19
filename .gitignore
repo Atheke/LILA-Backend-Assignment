@@ -1,3 +1,9 @@
+Lila Backend Assignment A .pdf
+
 frontend/node_modules/
 nakama/node_modules/
 frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.production
+frontend/.env.production.local
