@@ -73,7 +73,8 @@ export async function createMatch(): Promise<string> {
       Accept: "application/json",
       "Content-Type": "application/json"
     },
-    body: "{}"
+    // Nakama's REST RPC body must be a JSON string (grpc-gateway), not a raw object.
+    body: JSON.stringify("{}")
   });
   const text = await res.text();
   if (!res.ok) {
