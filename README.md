@@ -14,8 +14,7 @@ Multiplayer Tic-Tac-Toe with Nakama (server-authoritative match) and a React cli
 - `docker-compose.yml` - Local Nakama and Postgres containers
 - `deploy/` - Production Docker image and Render/Railway hints (`deploy/README.md`); entrypoint script lives in `nakama/docker-entrypoint.sh`
 - `nakama/` - Runtime source and TypeScript build config
-- `nakama/modules/index.ts` - Runtime entrypoint: registers the match handler and RPCs (`InitModule`)
-- `nakama/modules/tic_tac_toe.ts` - Server-authoritative match logic (join, moves, restart, broadcasts) and `create_tic_tac_toe_match` RPC implementation
+- `nakama/modules/tic_tac_toe.ts` - Match logic, `create_tic_tac_toe_match` RPC, and `InitModule` (single compiled JS file for Nakama load order)
 - `frontend/` - Web client
 - `frontend/src/env.ts` - Reads public Nakama settings from `VITE_*` env vars
 - `frontend/src/nakama.ts` - Nakama client (device auth, socket, RPC, match messages)
@@ -25,7 +24,7 @@ Multiplayer Tic-Tac-Toe with Nakama (server-authoritative match) and a React cli
 
 ## Architecture and Design Decisions
 
-- All game rules run on Nakama in `tic_tac_toe.ts`. `index.ts` only wires `InitModule` to Nakama’s initializer (match name `tic_tac_toe`, RPC `create_tic_tac_toe_match`).
+- All game rules and `InitModule` live in `tic_tac_toe.ts` (one emitted `tic_tac_toe.js` so Nakama’s JS runtime does not load `index.js` without handlers).
 - The web client connects to Nakama automatically on load (no manual “connect” step).
 - Clients send move intent (`index`) with opcode `1`, and restart requests with opcode `3`.
 - Server validates:

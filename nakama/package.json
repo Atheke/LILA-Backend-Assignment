@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "tsc"
+    "build": "rm -f modules/build/*.js && tsc"
   },
   "devDependencies": {
     "typescript": "^5.6.3"
