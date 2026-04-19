@@ -36,6 +36,8 @@ interface MatchState {
   turnDeadlineTick: number | null;
   statsApplied: boolean;
   endReason: EndReason;
+  /** userId -> username seen on presences (socket), used when DB username is missing on leaderboard write */
+  usernames: Record<string, string>;
 }
 
 interface MovePayload {
@@ -144,17 +146,10 @@ function writeUserStatsAndLeaderboard(
   logger: nkruntime.Logger,
   userId: string,
   stats: PlayerStats,
-  version?: string
+  version: string | undefined,
+  presenceUsernameHint: string | undefined
 ): void {
-  let username = "";
-  try {
-    const users = nk.usersGetId([userId]);
-    if (users && users.length > 0 && typeof users[0]!.username === "string") {
-      username = users[0]!.username as string;
-    }
-  } catch (e) {
-    logger.debug(`usersGetId: ${String(e)}`);
-  }
+  const username = resolvePlayerUsername(nk, logger, userId, presenceUsernameHint);
 
   const write: nkruntime.StorageWriteInput = {
     collection: STATS_COLLECTION,
@@ -180,18 +175,21 @@ function writeUserStatsAndLeaderboard(
     return;
   }
 
-  const meta = {
+  const meta: Record<string, unknown> = {
     wins: stats.wins,
     losses: stats.losses,
     winStreak: stats.winStreak,
     bestWinStreak: stats.bestWinStreak
   };
+  if (username.length > 0) {
+    meta.displayName = username;
+  }
 
   try {
     nk.leaderboardRecordWrite(
       LEADERBOARD_ID,
       userId,
-      username || undefined,
+      username.length > 0 ? username : undefined,
       ratingScore(stats),
       0,
       meta,
@@ -219,7 +217,7 @@ function applyMatchStats(nk: nkruntime.Nakama, logger: nkruntime.Logger, state: 
       for (const uid of ids) {
         const { stats, version } = readUserStats(nk, uid);
         stats.winStreak = 0;
-        writeUserStatsAndLeaderboard(nk, logger, uid, stats, version);
+        writeUserStatsAndLeaderboard(nk, logger, uid, stats, version, state.usernames[uid]);
       }
       return;
     }
@@ -240,8 +238,8 @@ function applyMatchStats(nk: nkruntime.Nakama, logger: nkruntime.Logger, state: 
     lRead.stats.losses += 1;
     lRead.stats.winStreak = 0;
 
-    writeUserStatsAndLeaderboard(nk, logger, winnerUserId, wRead.stats, wRead.version);
-    writeUserStatsAndLeaderboard(nk, logger, loserUserId, lRead.stats, lRead.version);
+    writeUserStatsAndLeaderboard(nk, logger, winnerUserId, wRead.stats, wRead.version, state.usernames[winnerUserId]);
+    writeUserStatsAndLeaderboard(nk, logger, loserUserId, lRead.stats, lRead.version, state.usernames[loserUserId]);
   } catch (e) {
     logger.info(`applyMatchStats error: ${String(e)}`);
   }
@@ -307,6 +305,45 @@ function getUserId(presence: RuntimePresence | undefined): string {
   return "";
 }
 
+function recordUsernameFromPresence(state: MatchState, presence: nkruntime.Presence): void {
+  const rp = presence as RuntimePresence;
+  const uid = getUserId(rp);
+  const raw = typeof rp.username === "string" ? rp.username.trim() : "";
+  if (uid && raw.length > 0) {
+    state.usernames[uid] = raw;
+  }
+}
+
+function resolvePlayerUsername(nk: nkruntime.Nakama, logger: nkruntime.Logger, userId: string, fromMatch?: string): string {
+  const hint = (fromMatch ?? "").trim();
+  if (hint.length > 0) {
+    return hint;
+  }
+  try {
+    const users = nk.usersGetId([userId]);
+    for (const row of users ?? []) {
+      const u = row as { userId?: string; username?: string };
+      if (typeof u.username === "string" && u.username.trim().length > 0) {
+        if (!u.userId || u.userId === userId) {
+          return u.username.trim();
+        }
+      }
+    }
+  } catch (e) {
+    logger.debug(`usersGetId ${userId}: ${String(e)}`);
+  }
+  try {
+    const accounts = nk.accountsGetId([userId], []);
+    const first = accounts && accounts[0];
+    if (first && first.user && typeof first.user.username === "string" && first.user.username.trim().length > 0) {
+      return first.user.username.trim();
+    }
+  } catch (e) {
+    logger.debug(`accountsGetId ${userId}: ${String(e)}`);
+  }
+  return "";
+}
+
 function decodeMatchData(data: Uint8Array | ArrayBuffer | string | undefined): string {
   if (typeof data === "string") {
     return data;
@@ -344,7 +381,8 @@ function matchInit(_ctx: nkruntime.Context, _logger: nkruntime.Logger, _nk: nkru
     mode,
     turnDeadlineTick: null,
     statsApplied: false,
-    endReason: null
+    endReason: null,
+    usernames: {}
   };
 
   return {
@@ -371,6 +409,7 @@ function matchJoinAttempt(
     return { state, accept: false, rejectMessage: "Match is full." };
   }
 
+  recordUsernameFromPresence(state, presence);
   dispatcher.matchLabelUpdate(buildLabel(state));
   return { state, accept: true };
 }
@@ -385,6 +424,7 @@ function matchJoin(
   presences: nkruntime.Presence[]
 ) {
   for (const presence of presences as RuntimePresence[]) {
+    recordUsernameFromPresence(state, presence as nkruntime.Presence);
     const userId = getUserId(presence);
     if (!userId) {
       continue;
@@ -455,6 +495,9 @@ function matchLoop(
   processTurnTimeout(nk, logger, dispatcher, tick, state);
 
   for (const message of messages as RuntimeMatchData[]) {
+    if (message.sender) {
+      recordUsernameFromPresence(state, message.sender as nkruntime.Presence);
+    }
     const opCode = message.opCode ?? message.op_code ?? -1;
     const senderId = getUserId(message.sender);
     if (!senderId) {

@@ -67,6 +67,7 @@ declare namespace nkruntime {
     storageRead(ids: Array<{ collection: string; key: string; userId?: string }>): StorageReadResult[];
     storageWrite(writes: StorageWriteInput[]): unknown;
     usersGetId(userIds: string[]): Array<{ userId?: string; username?: string }>;
+    accountsGetId(userIds: string[], deviceIds: string[]): Array<{ user?: { userId?: string; username?: string } }>;
   }
   interface StorageReadResult {
     key: string;

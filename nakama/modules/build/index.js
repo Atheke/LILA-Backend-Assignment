@@ -78,17 +78,8 @@ function readUserStats(nk, userId) {
     };
     return { stats, version: row.version };
 }
-function writeUserStatsAndLeaderboard(nk, logger, userId, stats, version) {
-    let username = "";
-    try {
-        const users = nk.usersGetId([userId]);
-        if (users && users.length > 0 && typeof users[0].username === "string") {
-            username = users[0].username;
-        }
-    }
-    catch (e) {
-        logger.debug(`usersGetId: ${String(e)}`);
-    }
+function writeUserStatsAndLeaderboard(nk, logger, userId, stats, version, presenceUsernameHint) {
+    const username = resolvePlayerUsername(nk, logger, userId, presenceUsernameHint);
     const write = {
         collection: STATS_COLLECTION,
         key: STATS_KEY,
@@ -118,8 +109,11 @@ function writeUserStatsAndLeaderboard(nk, logger, userId, stats, version) {
         winStreak: stats.winStreak,
         bestWinStreak: stats.bestWinStreak
     };
+    if (username.length > 0) {
+        meta.displayName = username;
+    }
     try {
-        nk.leaderboardRecordWrite(LEADERBOARD_ID, userId, username || undefined, ratingScore(stats), 0, meta, "set");
+        nk.leaderboardRecordWrite(LEADERBOARD_ID, userId, username.length > 0 ? username : undefined, ratingScore(stats), 0, meta, "set");
     }
     catch (e) {
         logger.info(`leaderboardRecordWrite failed for ${userId}: ${String(e)}`);
@@ -139,7 +133,7 @@ function applyMatchStats(nk, logger, state) {
             for (const uid of ids) {
                 const { stats, version } = readUserStats(nk, uid);
                 stats.winStreak = 0;
-                writeUserStatsAndLeaderboard(nk, logger, uid, stats, version);
+                writeUserStatsAndLeaderboard(nk, logger, uid, stats, version, state.usernames[uid]);
             }
             return;
         }
@@ -156,8 +150,8 @@ function applyMatchStats(nk, logger, state) {
         const lRead = readUserStats(nk, loserUserId);
         lRead.stats.losses += 1;
         lRead.stats.winStreak = 0;
-        writeUserStatsAndLeaderboard(nk, logger, winnerUserId, wRead.stats, wRead.version);
-        writeUserStatsAndLeaderboard(nk, logger, loserUserId, lRead.stats, lRead.version);
+        writeUserStatsAndLeaderboard(nk, logger, winnerUserId, wRead.stats, wRead.version, state.usernames[winnerUserId]);
+        writeUserStatsAndLeaderboard(nk, logger, loserUserId, lRead.stats, lRead.version, state.usernames[loserUserId]);
     }
     catch (e) {
         logger.info(`applyMatchStats error: ${String(e)}`);
@@ -212,6 +206,45 @@ function getUserId(presence) {
     }
     return "";
 }
+function recordUsernameFromPresence(state, presence) {
+    const rp = presence;
+    const uid = getUserId(rp);
+    const raw = typeof rp.username === "string" ? rp.username.trim() : "";
+    if (uid && raw.length > 0) {
+        state.usernames[uid] = raw;
+    }
+}
+function resolvePlayerUsername(nk, logger, userId, fromMatch) {
+    const hint = (fromMatch !== null && fromMatch !== void 0 ? fromMatch : "").trim();
+    if (hint.length > 0) {
+        return hint;
+    }
+    try {
+        const users = nk.usersGetId([userId]);
+        for (const row of users !== null && users !== void 0 ? users : []) {
+            const u = row;
+            if (typeof u.username === "string" && u.username.trim().length > 0) {
+                if (!u.userId || u.userId === userId) {
+                    return u.username.trim();
+                }
+            }
+        }
+    }
+    catch (e) {
+        logger.debug(`usersGetId ${userId}: ${String(e)}`);
+    }
+    try {
+        const accounts = nk.accountsGetId([userId], []);
+        const first = accounts && accounts[0];
+        if (first && first.user && typeof first.user.username === "string" && first.user.username.trim().length > 0) {
+            return first.user.username.trim();
+        }
+    }
+    catch (e) {
+        logger.debug(`accountsGetId ${userId}: ${String(e)}`);
+    }
+    return "";
+}
 function decodeMatchData(data) {
     if (typeof data === "string") {
         return data;
@@ -243,7 +276,8 @@ function matchInit(_ctx, _logger, _nk, params) {
         mode,
         turnDeadlineTick: null,
         statsApplied: false,
-        endReason: null
+        endReason: null,
+        usernames: {}
     };
     return {
         state,
@@ -258,11 +292,13 @@ function matchJoinAttempt(_ctx, _logger, _nk, dispatcher, _tick, state, presence
     if (!allowed) {
         return { state, accept: false, rejectMessage: "Match is full." };
     }
+    recordUsernameFromPresence(state, presence);
     dispatcher.matchLabelUpdate(buildLabel(state));
     return { state, accept: true };
 }
 function matchJoin(_ctx, _logger, _nk, dispatcher, tick, state, presences) {
     for (const presence of presences) {
+        recordUsernameFromPresence(state, presence);
         const userId = getUserId(presence);
         if (!userId) {
             continue;
@@ -310,6 +346,9 @@ function matchLoop(_ctx, logger, nk, dispatcher, tick, state, messages) {
     var _a, _b;
     processTurnTimeout(nk, logger, dispatcher, tick, state);
     for (const message of messages) {
+        if (message.sender) {
+            recordUsernameFromPresence(state, message.sender);
+        }
         const opCode = (_b = (_a = message.opCode) !== null && _a !== void 0 ? _a : message.op_code) !== null && _b !== void 0 ? _b : -1;
         const senderId = getUserId(message.sender);
         if (!senderId) {

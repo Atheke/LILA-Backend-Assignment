@@ -406,11 +406,15 @@ function App(): JSX.Element {
   };
 
   const formatRecord = (r: LeaderboardRecord, rank: number) => {
-    const meta = r.metadata as { wins?: number; losses?: number; winStreak?: number; bestWinStreak?: number } | undefined;
+    const meta = r.metadata as
+      | { wins?: number; losses?: number; winStreak?: number; bestWinStreak?: number; displayName?: string }
+      | undefined;
     const wins = meta?.wins ?? 0;
     const losses = meta?.losses ?? 0;
     const streak = meta?.winStreak ?? 0;
-    const username = r.username && r.username.length > 0 ? r.username : r.owner_id?.slice(0, 8) ?? "?";
+    const fromMeta = typeof meta?.displayName === "string" && meta.displayName.length > 0 ? meta.displayName : "";
+    const fromRecord = r.username && r.username.length > 0 ? r.username : "";
+    const username = fromMeta || fromRecord || r.owner_id?.slice(0, 8) || "?";
     return { rank, username, score: Number(r.score), wins, losses, streak };
   };
 
