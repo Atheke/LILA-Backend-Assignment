@@ -38,13 +38,17 @@ export async function getCurrentUserId(): Promise<string> {
 }
 
 export async function createMatch(): Promise<string> {
-  const activeSession = await authenticateDevice();
-  const rpcResult = await client.rpc(activeSession, "create_tic_tac_toe_match", {});
-  const matchId = (rpcResult.payload as { matchId?: string } | undefined)?.matchId;
-  if (!matchId) {
+  const activeSocket = await createSocket();
+  const result = await activeSocket.rpc("create_tic_tac_toe_match", "{}");
+  const raw = result?.payload;
+  if (!raw) {
+    throw new Error("Nakama RPC did not return a payload.");
+  }
+  const parsed = JSON.parse(raw) as { matchId?: string };
+  if (!parsed.matchId) {
     throw new Error("Nakama RPC did not return a match ID.");
   }
-  return matchId;
+  return parsed.matchId;
 }
 
 export async function joinMatch(matchId: string) {
