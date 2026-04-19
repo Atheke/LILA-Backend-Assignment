@@ -36,6 +36,11 @@ export async function createSocket(): Promise<Socket> {
   return socket;
 }
 
+export async function getCurrentUserId(): Promise<string> {
+  const activeSession = await authenticateDevice();
+  return activeSession.user_id;
+}
+
 export async function createMatch(): Promise<string> {
   const activeSocket = await createSocket();
   const match = await activeSocket.createMatch("tic_tac_toe");

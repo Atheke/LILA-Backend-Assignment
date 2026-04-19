@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createMatch, createSocket, joinMatch } from "./nakama";
+import { createMatch, createSocket, getCurrentUserId, joinMatch, sendMove } from "./nakama";
 
 type CellValue = "X" | "O" | "";
 type WinnerValue = "X" | "O" | "draw" | null;
@@ -21,12 +21,14 @@ function App(): JSX.Element {
   const [turn, setTurn] = useState<string | null>(null);
   const [players, setPlayers] = useState<Record<string, "X" | "O">>({});
   const [winner, setWinner] = useState<WinnerValue>(null);
+  const [userId, setUserId] = useState("");
   const decoder = new TextDecoder();
 
   const connect = async () => {
     try {
       await createSocket();
       const socket = await createSocket();
+      setUserId(await getCurrentUserId());
       socket.onmatchdata = (matchData) => {
         if (matchData.op_code !== 2) {
           return;
@@ -77,6 +79,26 @@ function App(): JSX.Element {
     }
   };
 
+  const onCellClick = async (index: number) => {
+    if (!matchId || winner !== null) {
+      return;
+    }
+
+    if (turn !== userId) {
+      return;
+    }
+
+    if (board[index] !== "") {
+      return;
+    }
+
+    try {
+      await sendMove(matchId, index);
+    } catch (err) {
+      setError(`Move failed: ${String(err)}`);
+    }
+  };
+
   return (
     <main style={{ maxWidth: 640, margin: "0 auto", padding: 16 }}>
       <h1>Multiplayer Tic-Tac-Toe</h1>
@@ -117,19 +139,23 @@ function App(): JSX.Element {
           </p>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 64px)", gap: 6, marginTop: 8 }}>
             {board.map((cell, idx) => (
-              <div
+              <button
                 key={idx}
+                type="button"
+                onClick={() => onCellClick(idx)}
+                disabled={!matchId || winner !== null || turn !== userId || board[idx] !== ""}
                 style={{
                   width: 64,
                   height: 64,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  border: "1px solid #aaa"
+                  border: "1px solid #aaa",
+                  fontSize: 22
                 }}
               >
                 {cell}
-              </div>
+              </button>
             ))}
           </div>
         </section>
