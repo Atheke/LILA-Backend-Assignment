@@ -1,3 +1,5 @@
+// Nakama loads only index.js from the runtime path (server entrypoint). All handlers + InitModule must live here.
+
 type CellValue = "X" | "O" | "";
 type WinnerValue = "X" | "O" | "draw" | null;
 
