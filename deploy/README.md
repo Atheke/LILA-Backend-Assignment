@@ -10,11 +10,11 @@ From the **repository root** (so paths `nakama/` and `deploy/` exist in the buil
 docker build -f deploy/Dockerfile -t nakama-ttt .
 ```
 
-The image runs `npm ci` and `npm run build` in `nakama/` during the build; you do not need a separate host build step. On Render, leave **Root Directory** empty so the context is the repo root; otherwise `COPY deploy/entrypoint.sh` fails.
+The image runs `npm ci` and `npm run build` in `nakama/` during the build; you do not need a separate host build step. The container entrypoint is `nakama/docker-entrypoint.sh` (baked in from the build stage, not copied from `deploy/`).
 
 ## Startup command
 
-The container runs `deploy/entrypoint.sh`, which:
+The container runs `nakama/docker-entrypoint.sh`, which:
 
 1. Resolves the database DSN (see below).
 2. Runs `nakama migrate up --database.address …`.

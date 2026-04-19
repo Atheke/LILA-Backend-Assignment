@@ -1,12 +1,12 @@
 # =============================================================================
-# Build context MUST be the repository root (the directory that contains
-# `nakama/` and `deploy/`). Example:
+# Build context: repository root (directory containing `nakama/`).
 #   docker build -f deploy/Dockerfile .
 #
-# If you see "deploy/entrypoint.sh: not found", your context is wrong (e.g.
-# Render "Root Directory" set to a subfolder). Clear it so the repo root is used.
+# The entrypoint is copied from the build stage (under nakama/) so the final
+# image does not depend on deploy/entrypoint.sh existing in the host context
+# (fixes Render/CI setups where only part of the tree is visible).
 #
-# TypeScript modules are compiled inside this image (no host `npm run build`).
+# TypeScript modules are compiled in the first stage (npm run build).
 # =============================================================================
 
 FROM node:20-alpine AS nakama-modules
@@ -18,7 +18,7 @@ RUN npm run build
 
 FROM registry.heroiclabs.com/heroiclabs/nakama:3.22.0
 COPY --from=nakama-modules /build/nakama/modules/build /nakama/data/modules/build
-COPY deploy/entrypoint.sh /entrypoint.sh
+COPY --from=nakama-modules /build/nakama/docker-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 7350 7351 7349

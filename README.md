@@ -12,7 +12,7 @@ Multiplayer Tic-Tac-Toe with Nakama (server-authoritative match) and a React cli
 ## Project Structure
 
 - `docker-compose.yml` - Local Nakama and Postgres containers
-- `deploy/` - Production Docker image, entrypoint, and Render/Railway hints (`deploy/README.md`)
+- `deploy/` - Production Docker image and Render/Railway hints (`deploy/README.md`); entrypoint script lives in `nakama/docker-entrypoint.sh`
 - `nakama/` - Runtime source and TypeScript build config
 - `nakama/modules/index.ts` - Runtime entrypoint: registers the match handler and RPCs (`InitModule`)
 - `nakama/modules/tic_tac_toe.ts` - Server-authoritative match logic (join, moves, restart, broadcasts) and `create_tic_tac_toe_match` RPC implementation
