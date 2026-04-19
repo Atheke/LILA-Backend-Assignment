@@ -1,0 +1,51 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ttt-postgres
+    environment:
+      POSTGRES_DB: nakama
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: localdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "nakama"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nakama:
+    image: registry.heroiclabs.com/heroiclabs/nakama:3.22.0
+    container_name: ttt-nakama
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - "/bin/sh"
+      - "-ecx"
+      - >
+        /nakama/nakama migrate up --database.address postgres:localdb@postgres:5432/nakama &&
+        exec /nakama/nakama
+        --name nakama1
+        --database.address postgres:localdb@postgres:5432/nakama
+        --logger.level INFO
+        --runtime.path /nakama/data/modules/build
+        --session.token_expiry_sec 7200
+    restart: always
+    volumes:
+      - ./nakama/modules/build:/nakama/data/modules/build
+    ports:
+      - "7350:7350"
+      - "7351:7351"
+      - "7349:7349"
+    healthcheck:
+      test: ["CMD", "/nakama/nakama", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
