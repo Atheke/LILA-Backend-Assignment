@@ -2,11 +2,29 @@
 
 type CellValue = "X" | "O" | "";
 type WinnerValue = "X" | "O" | "draw" | null;
+type GameMode = "classic" | "timed";
+type EndReason = "timeout" | null;
+
+const LEADERBOARD_ID = "tic_tac_toe_ranking";
+const STATS_COLLECTION = "ttt_stats";
+const STATS_KEY = "summary";
+const TURN_SECONDS = 30;
+/** Points added to leaderboard rating on a win (operator: set uses absolute formula). */
+const WIN_POINTS = 10;
+const LOSS_POINTS = 5;
 
 interface MatchLabel {
   game: "tic_tac_toe";
   open: boolean;
   playerCount: number;
+  mode: GameMode;
+}
+
+interface PlayerStats {
+  wins: number;
+  losses: number;
+  winStreak: number;
+  bestWinStreak: number;
 }
 
 interface MatchState {
@@ -14,6 +32,10 @@ interface MatchState {
   turn: string | null;
   winner: WinnerValue;
   players: Record<string, "X" | "O">;
+  mode: GameMode;
+  turnDeadlineTick: number | null;
+  statsApplied: boolean;
+  endReason: EndReason;
 }
 
 interface MovePayload {
@@ -88,14 +110,172 @@ function buildLabel(state: MatchState): string {
   const label: MatchLabel = {
     game: "tic_tac_toe",
     open: Object.keys(state.players).length < 2 && state.winner === null,
-    playerCount: Object.keys(state.players).length
+    playerCount: Object.keys(state.players).length,
+    mode: state.mode
   };
 
   return JSON.stringify(label);
 }
 
-function broadcastState(dispatcher: nkruntime.MatchDispatcher, state: MatchState): void {
-  const payload = encoder.encode(JSON.stringify(state));
+function ratingScore(s: PlayerStats): number {
+  return Math.max(0, s.wins * WIN_POINTS - s.losses * LOSS_POINTS);
+}
+
+function readUserStats(nk: nkruntime.Nakama, userId: string): { stats: PlayerStats; version?: string } {
+  const rows = nk.storageRead([{ collection: STATS_COLLECTION, key: STATS_KEY, userId }]);
+  if (!rows || rows.length === 0) {
+    return {
+      stats: { wins: 0, losses: 0, winStreak: 0, bestWinStreak: 0 }
+    };
+  }
+  const row = rows[0]!;
+  const v = row.value;
+  const stats: PlayerStats = {
+    wins: typeof v.wins === "number" ? v.wins : 0,
+    losses: typeof v.losses === "number" ? v.losses : 0,
+    winStreak: typeof v.winStreak === "number" ? v.winStreak : 0,
+    bestWinStreak: typeof v.bestWinStreak === "number" ? v.bestWinStreak : 0
+  };
+  return { stats, version: row.version };
+}
+
+function writeUserStatsAndLeaderboard(
+  nk: nkruntime.Nakama,
+  logger: nkruntime.Logger,
+  userId: string,
+  stats: PlayerStats,
+  version?: string
+): void {
+  let username = "";
+  try {
+    const users = nk.usersGetId([userId]);
+    if (users && users.length > 0 && typeof users[0]!.username === "string") {
+      username = users[0]!.username as string;
+    }
+  } catch (e) {
+    logger.debug(`usersGetId: ${String(e)}`);
+  }
+
+  const write: nkruntime.StorageWriteInput = {
+    collection: STATS_COLLECTION,
+    key: STATS_KEY,
+    userId,
+    value: {
+      wins: stats.wins,
+      losses: stats.losses,
+      winStreak: stats.winStreak,
+      bestWinStreak: stats.bestWinStreak
+    },
+    permissionRead: 2,
+    permissionWrite: 0
+  };
+  if (version) {
+    write.version = version;
+  }
+
+  try {
+    nk.storageWrite([write]);
+  } catch (e) {
+    logger.info(`storageWrite failed for ${userId}: ${String(e)}`);
+    return;
+  }
+
+  const meta = {
+    wins: stats.wins,
+    losses: stats.losses,
+    winStreak: stats.winStreak,
+    bestWinStreak: stats.bestWinStreak
+  };
+
+  try {
+    nk.leaderboardRecordWrite(
+      LEADERBOARD_ID,
+      userId,
+      username || undefined,
+      ratingScore(stats),
+      0,
+      meta,
+      "set"
+    );
+  } catch (e) {
+    logger.info(`leaderboardRecordWrite failed for ${userId}: ${String(e)}`);
+  }
+}
+
+function applyMatchStats(nk: nkruntime.Nakama, logger: nkruntime.Logger, state: MatchState): void {
+  if (state.statsApplied || state.winner === null) {
+    return;
+  }
+
+  const ids = Object.keys(state.players);
+  if (ids.length < 2) {
+    return;
+  }
+
+  state.statsApplied = true;
+
+  try {
+    if (state.winner === "draw") {
+      for (const uid of ids) {
+        const { stats, version } = readUserStats(nk, uid);
+        stats.winStreak = 0;
+        writeUserStatsAndLeaderboard(nk, logger, uid, stats, version);
+      }
+      return;
+    }
+
+    const winnerSymbol = state.winner;
+    const winnerUserId = ids.find((id) => state.players[id] === winnerSymbol);
+    const loserUserId = ids.find((id) => state.players[id] !== winnerSymbol);
+    if (!winnerUserId || !loserUserId) {
+      return;
+    }
+
+    const wRead = readUserStats(nk, winnerUserId);
+    wRead.stats.wins += 1;
+    wRead.stats.winStreak += 1;
+    wRead.stats.bestWinStreak = Math.max(wRead.stats.bestWinStreak, wRead.stats.winStreak);
+
+    const lRead = readUserStats(nk, loserUserId);
+    lRead.stats.losses += 1;
+    lRead.stats.winStreak = 0;
+
+    writeUserStatsAndLeaderboard(nk, logger, winnerUserId, wRead.stats, wRead.version);
+    writeUserStatsAndLeaderboard(nk, logger, loserUserId, lRead.stats, lRead.version);
+  } catch (e) {
+    logger.info(`applyMatchStats error: ${String(e)}`);
+  }
+}
+
+function refreshTurnDeadline(state: MatchState, tick: number): void {
+  if (state.mode !== "timed" || state.winner !== null) {
+    state.turnDeadlineTick = null;
+    return;
+  }
+  if (Object.keys(state.players).length < 2 || !state.turn) {
+    state.turnDeadlineTick = null;
+    return;
+  }
+  state.turnDeadlineTick = tick + TURN_SECONDS;
+}
+
+function broadcastState(dispatcher: nkruntime.MatchDispatcher, state: MatchState, tick: number): void {
+  const secondsLeft =
+    state.mode === "timed" && state.turn && state.winner === null && state.turnDeadlineTick !== null
+      ? Math.max(0, state.turnDeadlineTick - tick)
+      : null;
+
+  const clientState = {
+    board: state.board,
+    turn: state.turn,
+    winner: state.winner,
+    players: state.players,
+    mode: state.mode,
+    secondsLeft,
+    endReason: state.endReason
+  };
+
+  const payload = encoder.encode(JSON.stringify(clientState));
   const buffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
   dispatcher.broadcastMessage(2, buffer as unknown as Uint8Array);
 }
@@ -147,12 +327,24 @@ function decodeMatchData(data: Uint8Array | ArrayBuffer | string | undefined): s
   return "";
 }
 
-function matchInit(_ctx: nkruntime.Context, _logger: nkruntime.Logger, _nk: nkruntime.Nakama, _params: unknown) {
+function parseMode(params: Record<string, unknown> | undefined): GameMode {
+  if (params && params.mode === "timed") {
+    return "timed";
+  }
+  return "classic";
+}
+
+function matchInit(_ctx: nkruntime.Context, _logger: nkruntime.Logger, _nk: nkruntime.Nakama, params: Record<string, unknown>) {
+  const mode = parseMode(params);
   const state: MatchState = {
     board: Array<CellValue>(9).fill(""),
     turn: null,
     winner: null,
-    players: {}
+    players: {},
+    mode,
+    turnDeadlineTick: null,
+    statsApplied: false,
+    endReason: null
   };
 
   return {
@@ -188,7 +380,7 @@ function matchJoin(
   _logger: nkruntime.Logger,
   _nk: nkruntime.Nakama,
   dispatcher: nkruntime.MatchDispatcher,
-  _tick: number,
+  tick: number,
   state: MatchState,
   presences: nkruntime.Presence[]
 ) {
@@ -208,20 +400,60 @@ function matchJoin(
     state.turn = xPlayer ? xPlayer[0] : null;
   }
 
+  refreshTurnDeadline(state, tick);
   dispatcher.matchLabelUpdate(buildLabel(state));
-  broadcastState(dispatcher, state);
+  broadcastState(dispatcher, state, tick);
   return { state };
+}
+
+function processTurnTimeout(
+  nk: nkruntime.Nakama,
+  logger: nkruntime.Logger,
+  dispatcher: nkruntime.MatchDispatcher,
+  tick: number,
+  state: MatchState
+): void {
+  if (
+    state.mode !== "timed" ||
+    state.winner !== null ||
+    !state.turn ||
+    state.turnDeadlineTick === null ||
+    tick < state.turnDeadlineTick
+  ) {
+    return;
+  }
+
+  const timedOutUser = state.turn;
+  const opponent = Object.keys(state.players).find((uid) => uid !== timedOutUser);
+  if (!opponent) {
+    state.turnDeadlineTick = null;
+    return;
+  }
+
+  const winnerSymbol = state.players[opponent];
+  if (!winnerSymbol) {
+    return;
+  }
+
+  state.winner = winnerSymbol;
+  state.endReason = "timeout";
+  state.turnDeadlineTick = null;
+  applyMatchStats(nk, logger, state);
+  dispatcher.matchLabelUpdate(buildLabel(state));
+  broadcastState(dispatcher, state, tick);
 }
 
 function matchLoop(
   _ctx: nkruntime.Context,
-  _logger: nkruntime.Logger,
-  _nk: nkruntime.Nakama,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
   dispatcher: nkruntime.MatchDispatcher,
-  _tick: number,
+  tick: number,
   state: MatchState,
   messages: nkruntime.MatchData[]
 ) {
+  processTurnTimeout(nk, logger, dispatcher, tick, state);
+
   for (const message of messages as RuntimeMatchData[]) {
     const opCode = message.opCode ?? message.op_code ?? -1;
     const senderId = getUserId(message.sender);
@@ -238,10 +470,13 @@ function matchLoop(
       }
       state.board = Array<CellValue>(9).fill("");
       state.winner = null;
+      state.statsApplied = false;
+      state.endReason = null;
       const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
       state.turn = xPlayer ? xPlayer[0] : Object.keys(state.players)[0] || null;
+      refreshTurnDeadline(state, tick);
       dispatcher.matchLabelUpdate(buildLabel(state));
-      broadcastState(dispatcher, state);
+      broadcastState(dispatcher, state, tick);
       continue;
     }
 
@@ -283,10 +518,15 @@ function matchLoop(
     if (state.winner === null) {
       const nextPlayer = Object.keys(state.players).find((playerId) => playerId !== senderId) || null;
       state.turn = nextPlayer;
+      refreshTurnDeadline(state, tick);
+    } else {
+      state.turnDeadlineTick = null;
+      state.endReason = null;
+      applyMatchStats(nk, logger, state);
     }
 
     dispatcher.matchLabelUpdate(buildLabel(state));
-    broadcastState(dispatcher, state);
+    broadcastState(dispatcher, state, tick);
   }
 
   return { state };
@@ -297,7 +537,7 @@ function matchLeave(
   _logger: nkruntime.Logger,
   _nk: nkruntime.Nakama,
   dispatcher: nkruntime.MatchDispatcher,
-  _tick: number,
+  tick: number,
   state: MatchState,
   presences: nkruntime.Presence[]
 ) {
@@ -317,8 +557,9 @@ function matchLeave(
     return null;
   }
 
+  refreshTurnDeadline(state, tick);
   dispatcher.matchLabelUpdate(buildLabel(state));
-  broadcastState(dispatcher, state);
+  broadcastState(dispatcher, state, tick);
   return { state };
 }
 
@@ -327,11 +568,11 @@ function matchTerminate(
   _logger: nkruntime.Logger,
   _nk: nkruntime.Nakama,
   dispatcher: nkruntime.MatchDispatcher,
-  _tick: number,
+  tick: number,
   state: MatchState,
   _graceSeconds: number
 ) {
-  broadcastState(dispatcher, state);
+  broadcastState(dispatcher, state, tick);
   return { state };
 }
 
@@ -347,17 +588,31 @@ function matchSignal(
   return { state, data };
 }
 
-function createTicTacToeMatch(_ctx: nkruntime.Context, _logger: nkruntime.Logger, nk: nkruntime.Nakama, _payload: string): string {
-  const matchId = nk.matchCreate("tic_tac_toe", {});
+function createTicTacToeMatch(_ctx: nkruntime.Context, _logger: nkruntime.Logger, nk: nkruntime.Nakama, payload: string): string {
+  let mode: GameMode = "classic";
+  try {
+    const parsed = JSON.parse(payload) as { mode?: string };
+    if (parsed.mode === "timed") {
+      mode = "timed";
+    }
+  } catch (_e) {
+    /* empty payload */
+  }
+  const matchId = nk.matchCreate("tic_tac_toe", { mode });
   return JSON.stringify({ matchId });
 }
 
-function InitModule(
-  _ctx: nkruntime.Context,
-  _logger: nkruntime.Logger,
-  _nk: nkruntime.Nakama,
-  initializer: nkruntime.Initializer
-): void {
+function ensureLeaderboard(nk: nkruntime.Nakama, logger: nkruntime.Logger): void {
+  try {
+    nk.leaderboardCreate(LEADERBOARD_ID, true, "desc", "set", "", {}, true);
+  } catch (e) {
+    logger.debug(`leaderboardCreate: ${String(e)}`);
+  }
+}
+
+function InitModule(_ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, initializer: nkruntime.Initializer): void {
+  ensureLeaderboard(nk, logger);
+
   initializer.registerMatch("tic_tac_toe", {
     matchInit: matchInit,
     matchJoinAttempt: matchJoinAttempt,

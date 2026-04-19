@@ -1,5 +1,11 @@
-import { Client, Session, Socket } from "@heroiclabs/nakama-js";
+import { Client, LeaderboardRecord, Session, Socket } from "@heroiclabs/nakama-js";
 import { getNakamaPublicConfig } from "./env";
+
+export const TIC_TAC_TOE_LEADERBOARD_ID = "tic_tac_toe_ranking";
+
+export type GameMode = "classic" | "timed";
+
+const DEVICE_STORAGE_KEY = "ttt-device-id";
 
 export function formatNakamaClientError(err: unknown): string {
   if (typeof err === "string") {
@@ -31,17 +37,58 @@ const client = new Client(serverKey, host, port, useSSL);
 let session: Session | null = null;
 let socket: Socket | null = null;
 
-export async function authenticateDevice(): Promise<Session> {
+function migrateLegacyDeviceId(): void {
+  try {
+    const fromSession = sessionStorage.getItem(DEVICE_STORAGE_KEY);
+    if (fromSession && !localStorage.getItem(DEVICE_STORAGE_KEY)) {
+      localStorage.setItem(DEVICE_STORAGE_KEY, fromSession);
+      sessionStorage.removeItem(DEVICE_STORAGE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function getOrCreateDeviceId(): string {
+  migrateLegacyDeviceId();
+  const existing = localStorage.getItem(DEVICE_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+  const id = crypto.randomUUID();
+  localStorage.setItem(DEVICE_STORAGE_KEY, id);
+  return id;
+}
+
+async function requireSession(): Promise<Session> {
   if (session && !session.isexpired(Date.now() / 1000)) {
     return session;
   }
+  throw new Error("Not authenticated. Choose a username first.");
+}
 
-  const storageKey = "ttt-device-id";
-  const existingDeviceId = sessionStorage.getItem(storageKey);
-  const deviceId = existingDeviceId ?? crypto.randomUUID();
-  sessionStorage.setItem(storageKey, deviceId);
+/** Stable device id + chosen username; persists stats on the same browser. */
+export async function authenticateWithUsername(username: string): Promise<Session> {
+  const trimmed = username.trim();
+  if (trimmed.length < 2 || trimmed.length > 16) {
+    throw new Error("Username must be 2–16 characters.");
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(trimmed)) {
+    throw new Error("Username may only contain letters, numbers, underscore, and hyphen.");
+  }
 
-  session = await client.authenticateDevice(deviceId, true);
+  const deviceId = getOrCreateDeviceId();
+
+  if (socket) {
+    try {
+      socket.disconnect(true);
+    } catch {
+      /* ignore */
+    }
+    socket = null;
+  }
+
+  session = await client.authenticateDevice(deviceId, true, trimmed);
   return session;
 }
 
@@ -50,22 +97,23 @@ export async function createSocket(): Promise<Socket> {
     return socket;
   }
 
-  const activeSession = await authenticateDevice();
+  const activeSession = await requireSession();
   socket = client.createSocket(useSSL, false);
   await socket.connect(activeSession, true);
   return socket;
 }
 
 export async function getCurrentUserId(): Promise<string> {
-  const activeSession = await authenticateDevice();
+  const activeSession = await requireSession();
   return activeSession.user_id ?? activeSession.username ?? "";
 }
 
-export async function createMatch(): Promise<string> {
-  const activeSession = await authenticateDevice();
+export async function createMatch(mode: GameMode = "classic"): Promise<string> {
+  const activeSession = await requireSession();
   const cfg = getNakamaPublicConfig();
   const scheme = cfg.useSSL ? "https://" : "http://";
   const rpcUrl = `${scheme}${cfg.host}:${cfg.port}/v2/rpc/${encodeURIComponent("create_tic_tac_toe_match")}?`;
+  const rpcPayload = JSON.stringify({ mode });
   const res = await fetch(rpcUrl, {
     method: "POST",
     headers: {
@@ -73,8 +121,7 @@ export async function createMatch(): Promise<string> {
       Accept: "application/json",
       "Content-Type": "application/json"
     },
-    // Nakama's REST RPC body must be a JSON string (grpc-gateway), not a raw object.
-    body: JSON.stringify("{}")
+    body: JSON.stringify(rpcPayload)
   });
   const text = await res.text();
   if (!res.ok) {
@@ -119,7 +166,28 @@ export async function leaveMatch(matchId: string): Promise<void> {
   await activeSocket.leaveMatch(matchId);
 }
 
-export async function listMatches(limit = 20) {
-  const activeSession = await authenticateDevice();
-  return client.listMatches(activeSession, limit, true, "", 0, 2, "+label.game:tic_tac_toe");
+function labelQueryForMode(mode: GameMode): string {
+  return `+label.game:tic_tac_toe +label.mode:${mode}`;
+}
+
+export async function listMatches(limit = 20, mode: GameMode = "classic") {
+  const activeSession = await requireSession();
+  return client.listMatches(activeSession, limit, true, "", 0, 2, labelQueryForMode(mode));
+}
+
+export async function fetchTopLeaderboardRecords(limit = 15): Promise<LeaderboardRecord[]> {
+  const activeSession = await requireSession();
+  const list = await client.listLeaderboardRecords(activeSession, TIC_TAC_TOE_LEADERBOARD_ID, undefined, limit);
+  return list.records ?? [];
+}
+
+export async function fetchMyLeaderboardRecord(): Promise<LeaderboardRecord | null> {
+  const activeSession = await requireSession();
+  const uid = activeSession.user_id;
+  if (!uid) {
+    return null;
+  }
+  const list = await client.listLeaderboardRecords(activeSession, TIC_TAC_TOE_LEADERBOARD_ID, [uid], 1);
+  const mine = list.owner_records?.[0] ?? list.records?.find((r) => r.owner_id === uid);
+  return mine ?? null;
 }

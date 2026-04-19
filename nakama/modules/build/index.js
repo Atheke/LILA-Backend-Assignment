@@ -1,5 +1,12 @@
 "use strict";
 // Nakama loads only index.js from the runtime path (server entrypoint). All handlers + InitModule must live here.
+const LEADERBOARD_ID = "tic_tac_toe_ranking";
+const STATS_COLLECTION = "ttt_stats";
+const STATS_KEY = "summary";
+const TURN_SECONDS = 30;
+/** Points added to leaderboard rating on a win (operator: set uses absolute formula). */
+const WIN_POINTS = 10;
+const LOSS_POINTS = 5;
 const WIN_LINES = [
     [0, 1, 2],
     [3, 4, 5],
@@ -46,12 +53,141 @@ function buildLabel(state) {
     const label = {
         game: "tic_tac_toe",
         open: Object.keys(state.players).length < 2 && state.winner === null,
-        playerCount: Object.keys(state.players).length
+        playerCount: Object.keys(state.players).length,
+        mode: state.mode
     };
     return JSON.stringify(label);
 }
-function broadcastState(dispatcher, state) {
-    const payload = encoder.encode(JSON.stringify(state));
+function ratingScore(s) {
+    return Math.max(0, s.wins * WIN_POINTS - s.losses * LOSS_POINTS);
+}
+function readUserStats(nk, userId) {
+    const rows = nk.storageRead([{ collection: STATS_COLLECTION, key: STATS_KEY, userId }]);
+    if (!rows || rows.length === 0) {
+        return {
+            stats: { wins: 0, losses: 0, winStreak: 0, bestWinStreak: 0 }
+        };
+    }
+    const row = rows[0];
+    const v = row.value;
+    const stats = {
+        wins: typeof v.wins === "number" ? v.wins : 0,
+        losses: typeof v.losses === "number" ? v.losses : 0,
+        winStreak: typeof v.winStreak === "number" ? v.winStreak : 0,
+        bestWinStreak: typeof v.bestWinStreak === "number" ? v.bestWinStreak : 0
+    };
+    return { stats, version: row.version };
+}
+function writeUserStatsAndLeaderboard(nk, logger, userId, stats, version) {
+    let username = "";
+    try {
+        const users = nk.usersGetId([userId]);
+        if (users && users.length > 0 && typeof users[0].username === "string") {
+            username = users[0].username;
+        }
+    }
+    catch (e) {
+        logger.debug(`usersGetId: ${String(e)}`);
+    }
+    const write = {
+        collection: STATS_COLLECTION,
+        key: STATS_KEY,
+        userId,
+        value: {
+            wins: stats.wins,
+            losses: stats.losses,
+            winStreak: stats.winStreak,
+            bestWinStreak: stats.bestWinStreak
+        },
+        permissionRead: 2,
+        permissionWrite: 0
+    };
+    if (version) {
+        write.version = version;
+    }
+    try {
+        nk.storageWrite([write]);
+    }
+    catch (e) {
+        logger.info(`storageWrite failed for ${userId}: ${String(e)}`);
+        return;
+    }
+    const meta = {
+        wins: stats.wins,
+        losses: stats.losses,
+        winStreak: stats.winStreak,
+        bestWinStreak: stats.bestWinStreak
+    };
+    try {
+        nk.leaderboardRecordWrite(LEADERBOARD_ID, userId, username || undefined, ratingScore(stats), 0, meta, "set");
+    }
+    catch (e) {
+        logger.info(`leaderboardRecordWrite failed for ${userId}: ${String(e)}`);
+    }
+}
+function applyMatchStats(nk, logger, state) {
+    if (state.statsApplied || state.winner === null) {
+        return;
+    }
+    const ids = Object.keys(state.players);
+    if (ids.length < 2) {
+        return;
+    }
+    state.statsApplied = true;
+    try {
+        if (state.winner === "draw") {
+            for (const uid of ids) {
+                const { stats, version } = readUserStats(nk, uid);
+                stats.winStreak = 0;
+                writeUserStatsAndLeaderboard(nk, logger, uid, stats, version);
+            }
+            return;
+        }
+        const winnerSymbol = state.winner;
+        const winnerUserId = ids.find((id) => state.players[id] === winnerSymbol);
+        const loserUserId = ids.find((id) => state.players[id] !== winnerSymbol);
+        if (!winnerUserId || !loserUserId) {
+            return;
+        }
+        const wRead = readUserStats(nk, winnerUserId);
+        wRead.stats.wins += 1;
+        wRead.stats.winStreak += 1;
+        wRead.stats.bestWinStreak = Math.max(wRead.stats.bestWinStreak, wRead.stats.winStreak);
+        const lRead = readUserStats(nk, loserUserId);
+        lRead.stats.losses += 1;
+        lRead.stats.winStreak = 0;
+        writeUserStatsAndLeaderboard(nk, logger, winnerUserId, wRead.stats, wRead.version);
+        writeUserStatsAndLeaderboard(nk, logger, loserUserId, lRead.stats, lRead.version);
+    }
+    catch (e) {
+        logger.info(`applyMatchStats error: ${String(e)}`);
+    }
+}
+function refreshTurnDeadline(state, tick) {
+    if (state.mode !== "timed" || state.winner !== null) {
+        state.turnDeadlineTick = null;
+        return;
+    }
+    if (Object.keys(state.players).length < 2 || !state.turn) {
+        state.turnDeadlineTick = null;
+        return;
+    }
+    state.turnDeadlineTick = tick + TURN_SECONDS;
+}
+function broadcastState(dispatcher, state, tick) {
+    const secondsLeft = state.mode === "timed" && state.turn && state.winner === null && state.turnDeadlineTick !== null
+        ? Math.max(0, state.turnDeadlineTick - tick)
+        : null;
+    const clientState = {
+        board: state.board,
+        turn: state.turn,
+        winner: state.winner,
+        players: state.players,
+        mode: state.mode,
+        secondsLeft,
+        endReason: state.endReason
+    };
+    const payload = encoder.encode(JSON.stringify(clientState));
     const buffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
     dispatcher.broadcastMessage(2, buffer);
 }
@@ -91,12 +227,23 @@ function decodeMatchData(data) {
     }
     return "";
 }
-function matchInit(_ctx, _logger, _nk, _params) {
+function parseMode(params) {
+    if (params && params.mode === "timed") {
+        return "timed";
+    }
+    return "classic";
+}
+function matchInit(_ctx, _logger, _nk, params) {
+    const mode = parseMode(params);
     const state = {
         board: Array(9).fill(""),
         turn: null,
         winner: null,
-        players: {}
+        players: {},
+        mode,
+        turnDeadlineTick: null,
+        statsApplied: false,
+        endReason: null
     };
     return {
         state,
@@ -114,7 +261,7 @@ function matchJoinAttempt(_ctx, _logger, _nk, dispatcher, _tick, state, presence
     dispatcher.matchLabelUpdate(buildLabel(state));
     return { state, accept: true };
 }
-function matchJoin(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
+function matchJoin(_ctx, _logger, _nk, dispatcher, tick, state, presences) {
     for (const presence of presences) {
         const userId = getUserId(presence);
         if (!userId) {
@@ -129,12 +276,39 @@ function matchJoin(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
         const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
         state.turn = xPlayer ? xPlayer[0] : null;
     }
+    refreshTurnDeadline(state, tick);
     dispatcher.matchLabelUpdate(buildLabel(state));
-    broadcastState(dispatcher, state);
+    broadcastState(dispatcher, state, tick);
     return { state };
 }
-function matchLoop(_ctx, _logger, _nk, dispatcher, _tick, state, messages) {
+function processTurnTimeout(nk, logger, dispatcher, tick, state) {
+    if (state.mode !== "timed" ||
+        state.winner !== null ||
+        !state.turn ||
+        state.turnDeadlineTick === null ||
+        tick < state.turnDeadlineTick) {
+        return;
+    }
+    const timedOutUser = state.turn;
+    const opponent = Object.keys(state.players).find((uid) => uid !== timedOutUser);
+    if (!opponent) {
+        state.turnDeadlineTick = null;
+        return;
+    }
+    const winnerSymbol = state.players[opponent];
+    if (!winnerSymbol) {
+        return;
+    }
+    state.winner = winnerSymbol;
+    state.endReason = "timeout";
+    state.turnDeadlineTick = null;
+    applyMatchStats(nk, logger, state);
+    dispatcher.matchLabelUpdate(buildLabel(state));
+    broadcastState(dispatcher, state, tick);
+}
+function matchLoop(_ctx, logger, nk, dispatcher, tick, state, messages) {
     var _a, _b;
+    processTurnTimeout(nk, logger, dispatcher, tick, state);
     for (const message of messages) {
         const opCode = (_b = (_a = message.opCode) !== null && _a !== void 0 ? _a : message.op_code) !== null && _b !== void 0 ? _b : -1;
         const senderId = getUserId(message.sender);
@@ -150,10 +324,13 @@ function matchLoop(_ctx, _logger, _nk, dispatcher, _tick, state, messages) {
             }
             state.board = Array(9).fill("");
             state.winner = null;
+            state.statsApplied = false;
+            state.endReason = null;
             const xPlayer = Object.entries(state.players).find(([, symbol]) => symbol === "X");
             state.turn = xPlayer ? xPlayer[0] : Object.keys(state.players)[0] || null;
+            refreshTurnDeadline(state, tick);
             dispatcher.matchLabelUpdate(buildLabel(state));
-            broadcastState(dispatcher, state);
+            broadcastState(dispatcher, state, tick);
             continue;
         }
         if (opCode !== 1) {
@@ -187,13 +364,19 @@ function matchLoop(_ctx, _logger, _nk, dispatcher, _tick, state, messages) {
         if (state.winner === null) {
             const nextPlayer = Object.keys(state.players).find((playerId) => playerId !== senderId) || null;
             state.turn = nextPlayer;
+            refreshTurnDeadline(state, tick);
+        }
+        else {
+            state.turnDeadlineTick = null;
+            state.endReason = null;
+            applyMatchStats(nk, logger, state);
         }
         dispatcher.matchLabelUpdate(buildLabel(state));
-        broadcastState(dispatcher, state);
+        broadcastState(dispatcher, state, tick);
     }
     return { state };
 }
-function matchLeave(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
+function matchLeave(_ctx, _logger, _nk, dispatcher, tick, state, presences) {
     for (const presence of presences) {
         const userId = getUserId(presence);
         if (!userId) {
@@ -208,22 +391,42 @@ function matchLeave(_ctx, _logger, _nk, dispatcher, _tick, state, presences) {
     if (Object.keys(state.players).length === 0) {
         return null;
     }
+    refreshTurnDeadline(state, tick);
     dispatcher.matchLabelUpdate(buildLabel(state));
-    broadcastState(dispatcher, state);
+    broadcastState(dispatcher, state, tick);
     return { state };
 }
-function matchTerminate(_ctx, _logger, _nk, dispatcher, _tick, state, _graceSeconds) {
-    broadcastState(dispatcher, state);
+function matchTerminate(_ctx, _logger, _nk, dispatcher, tick, state, _graceSeconds) {
+    broadcastState(dispatcher, state, tick);
     return { state };
 }
 function matchSignal(_ctx, _logger, _nk, _dispatcher, _tick, state, data) {
     return { state, data };
 }
-function createTicTacToeMatch(_ctx, _logger, nk, _payload) {
-    const matchId = nk.matchCreate("tic_tac_toe", {});
+function createTicTacToeMatch(_ctx, _logger, nk, payload) {
+    let mode = "classic";
+    try {
+        const parsed = JSON.parse(payload);
+        if (parsed.mode === "timed") {
+            mode = "timed";
+        }
+    }
+    catch (_e) {
+        /* empty payload */
+    }
+    const matchId = nk.matchCreate("tic_tac_toe", { mode });
     return JSON.stringify({ matchId });
 }
-function InitModule(_ctx, _logger, _nk, initializer) {
+function ensureLeaderboard(nk, logger) {
+    try {
+        nk.leaderboardCreate(LEADERBOARD_ID, true, "desc", "set", "", {}, true);
+    }
+    catch (e) {
+        logger.debug(`leaderboardCreate: ${String(e)}`);
+    }
+}
+function InitModule(_ctx, logger, nk, initializer) {
+    ensureLeaderboard(nk, logger);
     initializer.registerMatch("tic_tac_toe", {
         matchInit: matchInit,
         matchJoinAttempt: matchJoinAttempt,
