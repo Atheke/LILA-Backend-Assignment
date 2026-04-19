@@ -4,12 +4,13 @@ Production-oriented image and entrypoint: database settings come only from envir
 
 ## Build
 
-From the repository root (after compiling runtime modules):
+From the **repository root** (so paths `nakama/` and `deploy/` exist in the build context):
 
 ```bash
-cd nakama && npm ci && npm run build && cd ..
 docker build -f deploy/Dockerfile -t nakama-ttt .
 ```
+
+The image runs `npm ci` and `npm run build` in `nakama/` during the build; you do not need a separate host build step. On Render, leave **Root Directory** empty so the context is the repo root; otherwise `COPY deploy/entrypoint.sh` fails.
 
 ## Startup command
 

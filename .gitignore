@@ -1,5 +1,7 @@
 Lila Backend Assignment A .pdf
 
+deploy/.env
+
 frontend/node_modules/
 nakama/node_modules/
 frontend/dist/
