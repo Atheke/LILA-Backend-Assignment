@@ -53,7 +53,6 @@ function App(): JSX.Element {
 
   const connect = async () => {
     try {
-      await createSocket();
       const socket = await createSocket();
       setUserId(await getCurrentUserId());
       socket.onmatchdata = (matchData) => {
@@ -84,6 +83,9 @@ function App(): JSX.Element {
     try {
       const id = await createMatch();
       const joined = await joinMatch(id);
+      if (!joined.match_id) {
+        throw new Error("Join did not return a match ID.");
+      }
       setMatchId(joined.match_id);
       setPlayerCount(joined.presences.length);
       setError("");
@@ -98,6 +100,9 @@ function App(): JSX.Element {
     }
     try {
       const joined = await joinMatch(joinId.trim());
+      if (!joined.match_id) {
+        throw new Error("Join did not return a match ID.");
+      }
       setMatchId(joined.match_id);
       setPlayerCount(joined.presences.length);
       setError("");
@@ -129,15 +134,26 @@ function App(): JSX.Element {
   const refreshMatches = async () => {
     try {
       const result = await listMatches();
+      const matches = result.matches ?? [];
       setAvailableMatches(
-        result.matches.map((match) => ({
-          match_id: match.match_id,
-          size: match.size
-        }))
+        matches
+          .filter((match): match is { match_id: string; size: number } => {
+            return typeof match.match_id === "string" && typeof match.size === "number";
+          })
+          .map((match) => ({
+            match_id: match.match_id,
+            size: match.size
+          }))
+          .slice(0, 20)
       );
+      setError("");
     } catch (err) {
       setError(`Match listing failed: ${String(err)}`);
     }
+  };
+
+  const selectMatch = (id: string) => {
+    setJoinId(id);
   };
 
   return (
@@ -173,7 +189,7 @@ function App(): JSX.Element {
             <button
               key={match.match_id}
               type="button"
-              onClick={() => setJoinId(match.match_id)}
+              onClick={() => selectMatch(match.match_id)}
               style={{ marginRight: 8, marginBottom: 8 }}
             >
               {match.match_id} ({match.size}/2)

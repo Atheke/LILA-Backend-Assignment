@@ -6,7 +6,6 @@ const port = "7350";
 const useSSL = false;
 
 const client = new Client(serverKey, host, port, useSSL);
-client.timeout = 10000;
 
 let session: Session | null = null;
 let socket: Socket | null = null;
@@ -38,12 +37,15 @@ export async function createSocket(): Promise<Socket> {
 
 export async function getCurrentUserId(): Promise<string> {
   const activeSession = await authenticateDevice();
-  return activeSession.user_id;
+  return activeSession.user_id ?? "";
 }
 
 export async function createMatch(): Promise<string> {
   const activeSocket = await createSocket();
   const match = await activeSocket.createMatch("tic_tac_toe");
+  if (!match.match_id) {
+    throw new Error("Nakama did not return a match ID.");
+  }
   return match.match_id;
 }
 
@@ -59,5 +61,5 @@ export async function sendMove(matchId: string, index: number): Promise<void> {
 
 export async function listMatches(limit = 20) {
   const activeSession = await authenticateDevice();
-  return client.listMatches(activeSession, limit, true, "", 0, 2, "{}", "tic_tac_toe");
+  return client.listMatches(activeSession, limit, true, "", 0, 2, "+label.game:tic_tac_toe");
 }
