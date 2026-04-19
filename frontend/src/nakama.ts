@@ -1,6 +1,30 @@
 import { Client, Session, Socket } from "@heroiclabs/nakama-js";
 import { getNakamaPublicConfig } from "./env";
 
+export function formatNakamaClientError(err: unknown): string {
+  if (typeof err === "string") {
+    return err;
+  }
+  if (err instanceof Error) {
+    return err.message;
+  }
+  if (err && typeof err === "object" && "message" in err) {
+    const m = (err as { message?: unknown }).message;
+    if (typeof m === "string") {
+      const code = (err as { code?: unknown }).code;
+      return typeof code === "number" ? `${m} (code ${String(code)})` : m;
+    }
+  }
+  if (typeof Response !== "undefined" && err instanceof Response) {
+    return `HTTP ${String(err.status)}`;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 const { serverKey, host, port, useSSL } = getNakamaPublicConfig();
 const client = new Client(serverKey, host, port, useSSL);
 
@@ -38,9 +62,32 @@ export async function getCurrentUserId(): Promise<string> {
 }
 
 export async function createMatch(): Promise<string> {
-  const activeSocket = await createSocket();
-  const result = await activeSocket.rpc("create_tic_tac_toe_match", "{}");
-  const raw = result?.payload;
+  const activeSession = await authenticateDevice();
+  const cfg = getNakamaPublicConfig();
+  const scheme = cfg.useSSL ? "https://" : "http://";
+  const rpcUrl = `${scheme}${cfg.host}:${cfg.port}/v2/rpc/${encodeURIComponent("create_tic_tac_toe_match")}?`;
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${activeSession.token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json"
+    },
+    body: "{}"
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let detail = text;
+    try {
+      const parsed = JSON.parse(text) as { message?: string; error?: string };
+      detail = parsed.message || parsed.error || text;
+    } catch {
+      /* keep raw text */
+    }
+    throw new Error(`create_tic_tac_toe_match failed (${String(res.status)}): ${detail}`);
+  }
+  const envelope = JSON.parse(text) as { payload?: string };
+  const raw = envelope.payload;
   if (!raw) {
     throw new Error("Nakama RPC did not return a payload.");
   }

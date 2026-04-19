@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { createMatch, createSocket, getCurrentUserId, joinMatch, leaveMatch, listMatches, sendMove, sendRestart } from "./nakama";
+import {
+  createMatch,
+  createSocket,
+  formatNakamaClientError,
+  getCurrentUserId,
+  joinMatch,
+  leaveMatch,
+  listMatches,
+  sendMove,
+  sendRestart
+} from "./nakama";
 
 type CellValue = "X" | "O" | "";
 type WinnerValue = "X" | "O" | "draw" | null;
@@ -142,7 +152,7 @@ function App(): JSX.Element {
       setError("");
     } catch (err) {
       setConnecting(false);
-      setError(`Connect failed: ${String(err)}`);
+      setError(`Connect failed: ${formatNakamaClientError(err)}`);
     }
   };
 
@@ -156,7 +166,7 @@ function App(): JSX.Element {
       setMatchId(joined.match_id);
       setError("");
     } catch (err) {
-      setError(`Create failed: ${String(err)}`);
+      setError(`Create failed: ${formatNakamaClientError(err)}`);
     }
   };
 
@@ -172,7 +182,7 @@ function App(): JSX.Element {
       setMatchId(joined.match_id);
       setError("");
     } catch (err) {
-      setError(`Join failed: ${String(err)}`);
+      setError(`Join failed: ${formatNakamaClientError(err)}`);
     }
   };
 
@@ -192,7 +202,7 @@ function App(): JSX.Element {
     try {
       await sendMove(matchId, index);
     } catch (err) {
-      setError(`Move failed: ${String(err)}`);
+      setError(`Move failed: ${formatNakamaClientError(err)}`);
     }
   };
 
@@ -201,7 +211,7 @@ function App(): JSX.Element {
     try {
       await sendRestart(matchId);
     } catch (err) {
-      setError(`Restart failed: ${String(err)}`);
+      setError(`Restart failed: ${formatNakamaClientError(err)}`);
     }
   };
 
@@ -228,7 +238,7 @@ function App(): JSX.Element {
       setAvailableMatches(parseMatchListings(matches as Array<{ match_id: string; size?: number; label?: string }>));
       setError("");
     } catch (err) {
-      setError(`Match listing failed: ${String(err)}`);
+      setError(`Match listing failed: ${formatNakamaClientError(err)}`);
     }
   };
 
@@ -262,7 +272,7 @@ function App(): JSX.Element {
 
       setSearchStatus("No open matches found. Create one and wait for an opponent.");
     } catch (err) {
-      setError(`Discover failed: ${String(err)}`);
+      setError(`Discover failed: ${formatNakamaClientError(err)}`);
     } finally {
       setSearchingMatch(false);
     }
