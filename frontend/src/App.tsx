@@ -23,6 +23,27 @@ function App(): JSX.Element {
   const [winner, setWinner] = useState<WinnerValue>(null);
   const [userId, setUserId] = useState("");
   const decoder = new TextDecoder();
+  const mySymbol = userId ? players[userId] : undefined;
+  const isMyTurn = turn !== null && turn === userId;
+
+  const statusText = (() => {
+    if (winner === "draw") {
+      return "Game ended in a draw.";
+    }
+    if (winner) {
+      if (mySymbol && winner === mySymbol) {
+        return "You won!";
+      }
+      return "Opponent won.";
+    }
+    if (!matchId) {
+      return "Create or join a match to start.";
+    }
+    if (!mySymbol) {
+      return "Waiting to be assigned a symbol.";
+    }
+    return isMyTurn ? "Your turn" : "Opponent's turn";
+  })();
 
   const connect = async () => {
     try {
@@ -133,6 +154,12 @@ function App(): JSX.Element {
           </p>
           <p>
             <strong>Winner:</strong> {winner ?? "none"}
+          </p>
+          <p>
+            <strong>Player:</strong> {mySymbol ?? "spectator"}
+          </p>
+          <p>
+            <strong>Status:</strong> {statusText}
           </p>
           <p>
             <strong>Players:</strong> {Object.keys(players).length}
